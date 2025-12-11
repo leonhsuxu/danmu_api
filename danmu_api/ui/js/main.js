@@ -299,6 +299,13 @@ function switchSection(section) {
             event.target.classList.add('active');
 
             addLog(\`切换到\${section === 'env' ? '环境变量' : section === 'preview' ? '配置预览' : section === 'logs' ? '日志查看' : section === 'push' ? '推送弹幕' : '接口调试'}模块\`, 'info');
+            
+            // 如果切换到日志查看页面，则立即刷新日志
+            if (section === 'logs') {
+                if (typeof fetchRealLogs === 'function') {
+                    fetchRealLogs();
+                }
+            }
         }
     } else {
         // 对于非受保护页面（如配置预览），正常切换
@@ -337,7 +344,10 @@ async function init() {
         await updateApiEndpoint(); // 等待API端点更新完成
         getDockerVersion();
         // 从API获取配置信息，包括检查是否有admin token
-        await fetchAndSetConfig();
+        const config = await fetchAndSetConfig();
+
+        // 设置默认推送地址
+        setDefaultPushUrl(config);
 
         // 检查并处理管理员令牌
         checkAndHandleAdminToken();
