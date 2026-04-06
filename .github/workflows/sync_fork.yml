@@ -1,11 +1,9 @@
 name: Fork Sync
-permissions:
-    contents: write  # 只保留这个
 
 on:
     schedule:
-        - cron: "0 2 * * 1,4"
-    workflow_dispatch:
+        - cron: "0 2 * * 1,4"  # 每周一、四凌晨2点更新
+    workflow_dispatch:  # 允许手动触发
 
 jobs:
     sync_with_upstream:
@@ -17,12 +15,12 @@ jobs:
             - name: Checkout target repo
               uses: actions/checkout@v4
               with:
-                token: ${{ secrets.GITHUB_TOKEN }}
+                token: ${{ secrets.PAT_TOKEN }}  # ⭐ 使用 PAT 代替 GITHUB_TOKEN
                 
             - name: Sync Upstream
               uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
               with:
-                  target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+                  target_repo_token: ${{ secrets.PAT_TOKEN }}  # ⭐ 这里也改用 PAT
                   upstream_sync_repo: huangxd-/danmu_api
                   upstream_sync_branch: main
                   target_sync_branch: main
