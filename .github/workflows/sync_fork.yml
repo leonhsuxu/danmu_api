@@ -1,12 +1,11 @@
 name: Fork Sync
 permissions:
-    contents: write
-    workflows: write  # ⭐ 添加了这一行，允许修改workflow文件
+    contents: write  # 只保留这个
 
 on:
     schedule:
-        - cron: "0 2 * * 1,4"  # 每周一、四凌晨2点更新
-    workflow_dispatch:  # 允许手动触发
+        - cron: "0 2 * * 1,4"
+    workflow_dispatch:
 
 jobs:
     sync_with_upstream:
