@@ -8,7 +8,7 @@ function createCustomAlert() {
     }
 
     // 创建弹窗HTML元素
-    const alertHTML = '<div class="modal" id="custom-alert-overlay"><div class="modal-content" id="custom-alert-content"><div class="modal-header"><h3 id="custom-alert-title">提示</h3><button class="close-btn" id="custom-alert-close">&times;</button></div><div class="modal-body"><p id="custom-alert-message"></p></div><div class="modal-footer"><button class="btn btn-primary" id="custom-alert-confirm">确定</button></div></div></div>';
+    const alertHTML = '<div class="modal" id="custom-alert-overlay"><div class="modal-content" id="custom-alert-content"><div class="modal-header"><h3 id="custom-alert-title">提示</h3><button class="close-btn" id="custom-alert-close">&times;</button></div><div class="modal-body"><p id="custom-alert-message" style="word-break: break-all; white-space: pre-line;"></p></div><div class="modal-footer"><button class="btn btn-primary" id="custom-alert-confirm">确定</button></div></div></div>';
 
     // 添加到body
     document.body.insertAdjacentHTML('beforeend', alertHTML);
@@ -49,7 +49,7 @@ function customAlert(message, title = '提示') {
 
     // 设置标题和消息
     titleElement.textContent = title;
-    messageElement.textContent = message;
+    messageElement.textContent = message; // 使用 textContent 避免 message 中的 HTML 被解析执行；换行由元素 CSS white-space: pre-line 渲染
 
     // 显示弹窗
     overlay.classList.add('active');
@@ -106,7 +106,11 @@ document.addEventListener('DOMContentLoaded', createCustomAlert);
 // 数据存储
 let envVariables = {};
 let currentCategory = 'api'; // 默认分类改为api
+let envSearchQuery = '';
 let editingKey = null;
+let editingCategory = null;
+let editingKeyName = '';
+let editingType = 'text';
 let logs = []; // 保留本地日志数组，用于UI显示
 
 // 版本信息
@@ -116,10 +120,39 @@ let currentToken = 'globals.currentToken';
 let currentAdminToken = ''; // admin token，用于系统管理
 let originalToken = '';
 
+// 反向代理/API基础路径配置
+// 从LocalStorage获取用户自定义的Base URL
+let customBaseUrl = localStorage.getItem('logvar_api_base_url') || '';
+
+// 保存自定义Base URL (为空则清除)
+function saveBaseUrl() {
+    const input = document.getElementById('custom-base-url').value.trim();
+    if (input) {
+        // 确保URL不以斜杠结尾，方便后续拼接
+        let formattedUrl = input;
+        if (formattedUrl.endsWith('/')) {
+            formattedUrl = formattedUrl.slice(0, -1);
+        }
+        localStorage.setItem('logvar_api_base_url', formattedUrl);
+        customBaseUrl = formattedUrl;
+        customAlert('API地址配置已保存，即将刷新页面。', '保存成功');
+        setTimeout(() => {
+            location.reload();
+        }, 1000);
+    } else {
+        // 输入为空，视为清除配置/重置为默认
+        localStorage.removeItem('logvar_api_base_url');
+        customBaseUrl = '';
+        customAlert('配置已重置为默认状态，即将刷新页面。', '操作成功');
+        setTimeout(() => {
+            location.reload();
+        }, 1000);
+    }
+}
+
 // 构建带token的API请求路径
 function buildApiUrl(path, isSystemPath = false) {
     let res;
-    let _reverseProxy = "";
     // 如果是系统管理路径且有admin token,则使用admin token
     if (isSystemPath && currentAdminToken && currentAdminToken.trim() !== '' && currentAdminToken.trim() !== '*'.repeat(currentAdminToken.length)) {
         res = '/' + currentAdminToken + path;
@@ -127,7 +160,15 @@ function buildApiUrl(path, isSystemPath = false) {
         // 否则使用普通token
         res = (currentToken ? '/' + currentToken : "") + path;
     }
-    return _reverseProxy + res;
+    
+    // 如果配置了自定义基础URL (解决反代问题)
+    if (customBaseUrl) {
+        // 确保路径以/开头
+        const cleanPath = res.startsWith('/') ? res : '/' + res;
+        return customBaseUrl + cleanPath;
+    }
+
+    return res;
 }
 
 // 从API加载真实环境变量数据
@@ -143,7 +184,25 @@ function loadEnvVariables() {
             
             // 使用从API获取的原始环境变量，用于系统设置
             const originalEnvVars = config.originalEnvVars || {};
-            
+            // 浏览器偏好覆盖部署环境变量；云函数更新变量通常要等重新部署后才会进入新实例。
+            applyTheme(getStoredTheme() || originalEnvVars.UI_THEME || document.body.dataset.theme || 'lavender');
+            // 恢复独立的深浅色偏好：已存储 > 系统偏好 > 默认浅色
+            if (!document.body.dataset.colorScheme) {
+                var scheme = getStoredColorScheme();
+                if (!scheme) {
+                    scheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+                }
+                document.body.dataset.colorScheme = scheme;
+            }
+            updateColorSchemeToggle();
+            // 用户未手动选择时，跟随系统深浅色变更
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function (e) {
+                if (!getStoredColorScheme()) {
+                    document.body.dataset.colorScheme = e.matches ? 'dark' : 'light';
+                    updateColorSchemeToggle();
+                }
+            });
+
             // 重新组织数据结构以适配现有UI
             envVariables = {};
             
@@ -167,7 +226,8 @@ function loadEnvVariables() {
                     type: varConfig.type || 'text',
                     min: varConfig.min,
                     max: varConfig.max,
-                    options: varConfig.options || [] // 仅对 select 和 multi-select 类型有效
+                    options: varConfig.options || [], // 仅对 select 和 multi-select 类型有效
+                    sources: varConfig.sources || null // 仅对 DANMU_OFFSET 等需要来源配置的有效
                 });
             });
             
@@ -182,9 +242,19 @@ function loadEnvVariables() {
 // 更新API端点信息
 function updateApiEndpoint() {
   return fetch(buildApiUrl('/api/config', true))
-    .then(response => response.json())
+    .then(response => {
+        // 检查ContentType，如果是HTML说明可能是404页面或反代错误页面
+        const contentType = response.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") === -1) {
+             throw new Error("Received HTML instead of JSON. Possible 404 or Proxy Error.");
+        }
+        if (!response.ok) {
+            throw new Error(\`HTTP error! status: \${response.status}\`);
+        }
+        return response.json();
+    })
     .then(config => {
-      let _reverseProxy = "";
+      let _reverseProxy = customBaseUrl; // 使用全局配置
 
       // 获取当前页面的协议、主机和端口
       const protocol = window.location.protocol;
@@ -193,7 +263,22 @@ function updateApiEndpoint() {
       const adminToken = config.originalEnvVars?.ADMIN_TOKEN;
 
       // 获取URL路径并提取token
-      const urlPath = window.location.pathname.replace(_reverseProxy, "");
+      let urlPath = window.location.pathname;
+      if(_reverseProxy) {
+          try {
+              let proxyPath = _reverseProxy.startsWith('http') 
+                  ? new URL(_reverseProxy).pathname 
+                  : _reverseProxy;
+              
+              if (proxyPath.endsWith('/')) {
+                  proxyPath = proxyPath.slice(0, -1);
+              }
+              if(proxyPath && urlPath.startsWith(proxyPath)) {
+                  urlPath = urlPath.substring(proxyPath.length);
+              }
+          } catch(e) { /* ignore */ }
+      }
+
       const pathParts = urlPath.split('/').filter(part => part !== '');
       const urlToken = pathParts.length > 0 ? pathParts[0] : '';
       let apiToken = '********';
@@ -210,7 +295,23 @@ function updateApiEndpoint() {
       }
       
       // 构造API端点URL
-      const apiEndpoint = protocol + '//' + host + _reverseProxy + '/' + apiToken;
+      let baseUrlStr;
+      if (_reverseProxy) {
+          // 如果配置了反代，且是相对路径，则补全协议和主机，确保显示为绝对路径
+          baseUrlStr = _reverseProxy.startsWith('http') 
+              ? _reverseProxy 
+              : (protocol + '//' + host + _reverseProxy);
+      } else {
+          baseUrlStr = protocol + '//' + host;
+      }
+
+      // 确保 baseUrlStr 不以斜杠结尾
+      let cleanBaseUrl = baseUrlStr;
+      if (cleanBaseUrl.endsWith('/')) {
+          cleanBaseUrl = cleanBaseUrl.slice(0, -1);
+      }
+      const apiEndpoint = cleanBaseUrl + '/' + apiToken;
+      
       const apiEndpointElement = document.getElementById('api-endpoint');
       if (apiEndpointElement) {
         apiEndpointElement.textContent = apiEndpoint;
@@ -222,11 +323,39 @@ function updateApiEndpoint() {
       // 出错时显示默认值
       const protocol = window.location.protocol;
       const host = window.location.host;
-      const apiEndpoint = protocol + '//' + host + _reverseProxy + '/********';
+      let _reverseProxy = customBaseUrl;
+      
+      // 构造显示用的BaseUrl
+      let baseUrlStr;
+      if (_reverseProxy) {
+          baseUrlStr = _reverseProxy.startsWith('http') 
+              ? _reverseProxy 
+              : (protocol + '//' + host + _reverseProxy);
+      } else {
+          baseUrlStr = protocol + '//' + host;
+      }
+
+      let cleanBaseUrl = baseUrlStr;
+      if (cleanBaseUrl.endsWith('/')) {
+          cleanBaseUrl = cleanBaseUrl.slice(0, -1);
+      }
+      const apiEndpoint = cleanBaseUrl + '/********';
+      
       const apiEndpointElement = document.getElementById('api-endpoint');
       if (apiEndpointElement) {
         apiEndpointElement.textContent = apiEndpoint;
       }
+      
+      // 如果是因为反代导致的问题，显示输入框 (交由renderPreview处理，或者在这里也可以触发)
+      const proxyContainer = document.getElementById('proxy-config-container');
+      if(proxyContainer) {
+          proxyContainer.style.display = 'block';
+          // 填充当前输入框（如果有值）
+          if(customBaseUrl) {
+              document.getElementById('custom-base-url').value = customBaseUrl;
+          }
+      }
+      
       throw error; // 抛出错误，以便调用者可以处理
     });
 }
@@ -257,12 +386,40 @@ function getDockerVersion() {
 
 // 切换导航
 function switchSection(section, event = null) {
-    // 检查是否尝试访问受token保护的section（日志查看、接口调试、系统配置需要token访问）
-    if (section === 'logs' || section === 'api' || section === 'env' || section === 'push') {
-        let _reverseProxy = "";
+    // 点击已激活的"配置预览"时返回总览
+    if (section === 'preview' && document.getElementById('preview-section').classList.contains('active')) {
+        if (typeof resetToPreviewOverview === 'function') resetToPreviewOverview();
+        return;
+    }
+
+    // 检查是否尝试访问受token保护的section（日志查看、接口调试、推送弹幕、请求记录、系统配置需要token访问）
+    if (section === 'logs' || section === 'api' || section === 'env' || section === 'push' || section === 'request-records') {
+        let _reverseProxy = customBaseUrl; // 使用全局配置
 
         // 获取URL路径并提取token
-        const urlPath = window.location.pathname.replace(_reverseProxy, "");
+        let urlPath = window.location.pathname;
+        if(_reverseProxy) {
+            // 严谨地移除BaseUrl中的path部分
+            try {
+                // 如果_reverseProxy包含完整URL，提取pathname
+                // 如果只是相对路径，直接使用
+                let proxyPath = _reverseProxy.startsWith('http') 
+                    ? new URL(_reverseProxy).pathname 
+                    : _reverseProxy;
+                
+                // 确保移除尾部斜杠，防止匹配失败
+                if (proxyPath.endsWith('/')) {
+                    proxyPath = proxyPath.slice(0, -1);
+                }
+                
+                if(proxyPath && urlPath.startsWith(proxyPath)) {
+                    urlPath = urlPath.substring(proxyPath.length);
+                }
+            } catch(e) {
+                console.error("解析反代路径失败", e);
+            }
+        }
+        
         const pathParts = urlPath.split('/').filter(part => part !== '');
         const urlToken = pathParts.length > 0 ? pathParts[0] : '';
         
@@ -273,7 +430,24 @@ function switchSection(section, event = null) {
                 // 获取当前页面的协议、主机和端口
                 const protocol = window.location.protocol;
                 const host = window.location.host;
-                customAlert('请在URL中配置相应的TOKEN以访问此功能！\\n\\n访问方式：' + protocol + '//' + host + '/{TOKEN}');
+                
+                // 构造显示的BaseUrl，确保是绝对路径
+                let displayBase;
+                if (_reverseProxy) {
+                    displayBase = _reverseProxy.startsWith('http') 
+                        ? _reverseProxy 
+                        : (protocol + '//' + host + _reverseProxy);
+                } else {
+                    displayBase = protocol + '//' + host;
+                }
+                
+                if (displayBase.endsWith('/')) {
+                    displayBase = displayBase.slice(0, -1);
+                }
+                
+                // 根据section类型显示不同的token提示
+                const tokenType = section === 'env' ? 'ADMIN_TOKEN' : 'TOKEN';
+                customAlert('请在URL中配置相应的' + tokenType + '以访问此功能！\\n\\n访问方式：' + displayBase + '/{' + tokenType + '}');
             }, 100);
             return;
         }
@@ -298,7 +472,7 @@ function switchSection(section, event = null) {
                         event.target.classList.add('active');
                     }
 
-                    addLog(\`切换到\${section === 'env' ? '环境变量' : section === 'preview' ? '配置预览' : section === 'logs' ? '日志查看' : section === 'push' ? '推送弹幕' : '接口调试'}模块\`, 'info');
+                    addLog(\`切换到\${section === 'env' ? '环境变量' : section === 'preview' ? '配置预览' : section === 'logs' ? '日志查看' : section === 'push' ? '推送弹幕' : section === 'request-records' ? '请求记录' : '接口调试'}模块\`, 'info');
                 }
             });
         } else {
@@ -311,7 +485,7 @@ function switchSection(section, event = null) {
                 event.target.classList.add('active');
             }
 
-            addLog(\`切换到\${section === 'env' ? '环境变量' : section === 'preview' ? '配置预览' : section === 'logs' ? '日志查看' : section === 'push' ? '推送弹幕' : '接口调试'}模块\`, 'info');
+            addLog(\`切换到\${section === 'env' ? '环境变量' : section === 'preview' ? '配置预览' : section === 'logs' ? '日志查看' : section === 'push' ? '推送弹幕' : section === 'request-records' ? '请求记录' : '接口调试'}模块\`, 'info');
             
             // 如果切换到日志查看页面，则立即刷新日志
             if (section === 'logs') {
@@ -335,24 +509,53 @@ function switchSection(section, event = null) {
 }
 
 // 切换类别
-function switchCategory(category, event = null) {
+function switchCategory(category) {
     currentCategory = category;
-    document.querySelectorAll('.category-btn').forEach(b => b.classList.remove('active'));
-    if (event && event.target) {
-        event.target.classList.add('active');
-    }
+    clearEnvSearch(false);
     renderEnvList();
+}
+
+let modalPageScrollTop = 0;
+
+function lockPageScroll() {
+    if (document.body.classList.contains('modal-open')) {
+        return;
+    }
+
+    modalPageScrollTop = window.scrollY || document.documentElement.scrollTop;
+    document.documentElement.classList.add('modal-open');
+    document.body.classList.add('modal-open');
+    document.body.style.top = '-' + modalPageScrollTop + 'px';
+}
+
+function unlockPageScroll() {
+    if (!document.body.classList.contains('modal-open')) {
+        return;
+    }
+
+    document.documentElement.classList.remove('modal-open');
+    document.body.classList.remove('modal-open');
+    document.body.style.top = '';
+    window.scrollTo(0, modalPageScrollTop);
 }
 
 // 关闭模态框
 function closeModal() {
-    document.getElementById('env-modal').classList.remove('active');
-    
+    if (typeof cleanupSelectedTagsTouchDrag === 'function') cleanupSelectedTagsTouchDrag();
+    if (typeof handleStagingTouchCancel === 'function') handleStagingTouchCancel();
+
+    var modal = document.getElementById('env-modal');
+    modal.classList.add('closing');
+    setTimeout(function() {
+        modal.classList.remove('active');
+        modal.classList.remove('closing');
+        unlockPageScroll();
+    }, 220);
+    editingKey = null;
+    editingCategory = null;
     // 重置表单字段状态
-    document.getElementById('env-category').disabled = false;
-    document.getElementById('env-key').readOnly = false;
-    document.getElementById('value-type').disabled = false;
-    document.getElementById('env-description').readOnly = false;
+    editingKeyName = '';
+    editingType = 'text';
 }
 
 // 页面加载完成后初始化时获取一次日志
@@ -375,9 +578,30 @@ async function init() {
         addLog('系统初始化完成', 'success');
         // 获取真实日志数据
         fetchRealLogs();
+        
+        // 初始化推送弹幕界面
+        if (typeof initPushDanmuInterface === 'function') {
+            initPushDanmuInterface();
+        }
+        
+        // 初始化接口调试界面
+        if (typeof initApiTestInterface === 'function') {
+            initApiTestInterface();
+        }
+        
     } catch (error) {
         console.error('初始化失败:', error);
         addLog('系统初始化失败: ' + error.message, 'error');
+        
+        // 确保反代配置框显示
+        const proxyContainer = document.getElementById('proxy-config-container');
+        if(proxyContainer) {
+            proxyContainer.style.display = 'block';
+            if(customBaseUrl) {
+                document.getElementById('custom-base-url').value = customBaseUrl;
+            }
+        }
+        
         // 即使初始化失败，也要尝试获取日志
         fetchRealLogs();
     }
@@ -385,33 +609,200 @@ async function init() {
 
 // 复制API端点到剪贴板
 function copyApiEndpoint() {
-    const apiEndpointElement = document.getElementById('api-endpoint');
-    if (apiEndpointElement) {
-        const apiEndpoint = apiEndpointElement.textContent;
-        navigator.clipboard.writeText(apiEndpoint)
-            .then(() => {
-                // 临时改变显示文本以提供反馈
-                const originalText = apiEndpointElement.textContent;
-                apiEndpointElement.textContent = '已复制!';
-                apiEndpointElement.style.color = '#ff6b6b';
-                
-                // 2秒后恢复原始文本
-                setTimeout(() => {
-                    apiEndpointElement.textContent = originalText;
-                    apiEndpointElement.style.color = '#4CAF50';
-                }, 2000);
-                
-                addLog('API端点已复制到剪贴板: ' + apiEndpoint, 'success');
-            })
-            .catch(err => {
-                console.error('复制失败:', err);
-                customAlert('复制失败: ' + err);
-                addLog('复制API端点失败: ' + err, 'error');
-            });
+    var apiEndpointElement = document.getElementById('api-endpoint');
+    if (!apiEndpointElement) return;
+    var apiEndpoint = apiEndpointElement.textContent.trim();
+    if (!apiEndpoint || apiEndpoint === '加载中...') return;
+
+    var done = function() {
+        var originalText = apiEndpointElement.textContent;
+        apiEndpointElement.textContent = '已复制!';
+        apiEndpointElement.style.color = '#ff6b6b';
+        setTimeout(function() {
+            apiEndpointElement.textContent = originalText;
+            apiEndpointElement.style.color = '#4CAF50';
+        }, 2000);
+        addLog('API端点已复制到剪贴板: ' + apiEndpoint, 'success');
+    };
+
+    // 主方案：Clipboard API (需 HTTPS)
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(apiEndpoint).then(done).catch(function(err) {
+            // HTTPS 下仍失败则使用备用方案
+            fallbackCopy(apiEndpoint, done);
+        });
+    } else {
+        // HTTP 环境下的备用方案
+        fallbackCopy(apiEndpoint, done);
     }
+}
+
+function fallbackCopy(text, done) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+        document.execCommand('copy');
+        if (done) done();
+    } catch(e) {
+        customAlert('复制失败，请手动复制：' + text);
+    }
+    document.body.removeChild(ta);
+}
+
+function escapeHtml(text) {
+    // 如果是 null 或 undefined，返回空字符串
+    if (text === null || text === undefined) {
+        return '';
+    }
+    
+    // 将非字符串值转换为字符串
+    const str = String(text);
+    
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return str.replace(/[&<>"']/g, m => map[m]);
 }
 
 
 // 页面加载完成后初始化
 init();
+
+// 明暗模式切换
+function toggleColorScheme() {
+    const currentScheme = document.body.dataset.colorScheme || 'light';
+    const newScheme = currentScheme === 'dark' ? 'light' : 'dark';
+    document.body.dataset.colorScheme = newScheme;
+    storeColorScheme(newScheme);
+    updateColorSchemeToggle();
+}
+
+function updateColorSchemeToggle() {
+    const btn = document.getElementById('theme-corner-toggle');
+    if (!btn) return;
+    const scheme = document.body.dataset.colorScheme || 'light';
+    btn.textContent = scheme === 'dark' ? '☀' : '🌙';
+    btn.title = scheme === 'dark' ? '切换浅色模式' : '切换暗色模式';
+}
+
+// ===== 共享弹幕词库 =====
+const DANMAKU_DICT = [
+    '弹幕', 'Danmaku', 'Bullet Chat', 'Barrage', 'コメント',
+    'LogVar', '🚀', '🔥', '🎬', '✨', '💫', '🌸', '⭐', '📺',
+    '٩(◕‿◕｡)۶', '(≧▽≦)', '(ﾉ◕ヮ◕)ﾉ*:･ﾟ✧',
+    '—=≡Σ((( つ•̀ω•́)つ', 'Σ(°△°|||)︴', '喵~',
+    '彈幕 API 已就绪', '弹幕即正义', '弹幕引擎运行中', '幕弹',
+    '前方高能', '高能预警', '空降成功', '爷青回', 'DNA动了',
+    '名场面', '进度条保命', '梦が始まる',
+    '你指尖跃动的电光', '是我此生不灭的信仰',
+    '教练我想打篮球', '这也在你的计算之中吗',
+    '恭喜你发现宝藏', '优雅永不过时',
+    'バレットチャット', 'Comment',
+    '芜湖', '好耶', '不愧是你', '血压起来了',
+    '草(一种植物)', '典中典', '绷不住了', '绝绝子', '撒花🎉',
+    '感谢大佬', 'PR 欢迎', 'Star 一下',
+    '鸽子', '豆佬', '一路走来', '摆烂 10',
+    '𝒏𝒆𝒌𝒐', 'sleep', 'Aurora', '🐳𝔀𝓭𝓷𝓶𝓵𝓰𝓫𝓭', 'mask',
+    '我勒个豆儿', '从', '比企谷 雪乃', '水东', '一只歌鸽子(半夜看到我叫我滚去睡觉',
+    '@huangxd-', '@wan0ge', '@woleigedouer', '@Wo254992', '@lilixu3',
+    '@Celestials316', '@dyphire', '@piaoyizy', '@xiaoQQya', '@liixing',
+    '@goodcommunication', '@Mr-Quin', '@chason-zhao', '@DemoJameson',
+    '@rinnein', '@Lampon', '@zcw199604', 'Mashiro', '@wade6716',
+    '请合理使用', '公益服务请适当调高缓存避免滥用',
+    '有弹幕才有氛围~', '弹幕陪你看', 'LogVar可能会倒闭但绝对不会变质',
+];
+
+// 共享弹幕发射间隔 0.5~1.5s
+const DANMAKU_INTERVAL_MS = 500;
+
+// ===== 背景弹幕系统 =====
+(function initBgDanmaku() {
+    const colors = [
+        '#f09199', '#00a2ff', '#8cb48c', '#39c5bb',
+        '#e9485e', '#a682e6', '#f78c50', '#6B8AFF',
+        '#ffb74d', '#ce93d8', '#80cbc4',
+    ];
+    const container = document.createElement('div');
+    container.id = 'bg-danmaku-layer';
+    container.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:-1;';
+    document.body.appendChild(container);
+
+    let running = true;
+    let timer = null;
+
+    function spawn() {
+        if (!running) return;
+        const text = DANMAKU_DICT[Math.floor(Math.random() * DANMAKU_DICT.length)];
+        const el = document.createElement('span');
+        const top = 3 + Math.random() * 94;
+        const duration = 16 + Math.random() * 22;
+        const size = 14 + Math.random() * 14;
+        const delay = Math.random() * 5;
+        const color = colors[Math.floor(Math.random() * colors.length)];
+        const opacity = 0.24 + Math.random() * 0.16;
+        el.textContent = text;
+        el.style.cssText = [
+            'position:absolute','white-space:nowrap',
+            'top:' + top + '%','left:100%',
+            'font-size:' + size + 'px','font-weight:600',
+            'color:' + color,'opacity:' + opacity.toFixed(2),
+            'pointer-events:none','user-select:none',
+            'text-shadow:0 0 2px rgba(0,0,0,0.08), 0 0 6px currentColor',
+            'animation:danmakuScroll2 ' + duration + 's linear ' + delay + 's infinite',
+            'animation-fill-mode:backwards',
+        ].join(';');
+        container.appendChild(el);
+        setTimeout(() => { if (running) el.remove(); }, (duration + delay) * 1000 + 500);
+    }
+
+    function tick() {
+        spawn();
+        timer = setTimeout(tick, DANMAKU_INTERVAL_MS + Math.random() * DANMAKU_INTERVAL_MS * 2);
+    }
+
+    tick();
+
+    window._bgDanmaku = {
+        stop: function() { running = false; clearTimeout(timer); container.innerHTML = ''; },
+        start: function() { running = true; tick(); },
+    };
+})();
+
+// header 浮动点缀文字
+(function initHeaderDanmaku() {
+    const header = document.querySelector('.header');
+    if (!header) return;
+
+    const floatColors = [
+        'var(--theme-muted)', 'var(--theme-muted)',
+        '#f09199', '#00a2ff', '#8cb48c', '#39c5bb',
+        '#a682e6', '#f78c50', '#6B8AFF', '#ffb74d', '#ce93d8',
+    ];
+
+    function spawnHeaderFloat() {
+        const el = document.createElement('span');
+        el.className = 'header-danmaku-item';
+        el.textContent = DANMAKU_DICT[Math.floor(Math.random() * DANMAKU_DICT.length)];
+        const top = 4 + Math.random() * (header.offsetHeight - 22);
+        el.style.top = top + 'px';
+        el.style.fontSize = (11 + Math.random() * 5) + 'px';
+        el.style.color = floatColors[Math.floor(Math.random() * floatColors.length)];
+        el.style.animationDuration = (10 + Math.random() * 12) + 's';
+        header.appendChild(el);
+        el.addEventListener('animationend', function() { el.remove(); });
+    }
+
+    setInterval(spawnHeaderFloat, DANMAKU_INTERVAL_MS + Math.random() * DANMAKU_INTERVAL_MS * 2);
+    spawnHeaderFloat();
+})();
 `;
